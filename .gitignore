@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.cache/
+
+# Generated datasets and downloaded assets
+projects/*
+!projects/README.md
+uploads/*
+!uploads/README.md
+models/*
+!models/README.md
+my_voice_dataset/
+*_dataset/
+
+# Operating systems
+.DS_Store
+Thumbs.db

@@ -1,0 +1,11 @@
+# Core: downloading + transcription
+yt-dlp>=2024.1.0
+faster-whisper>=1.0.0
+
+# Optional alternative transcription backend:
+# openai-whisper>=20231117
+
+# Optional denoise / vocal isolation (enables the "Denoise" option):
+# demucs>=4.0.0
+
+# ffmpeg/ffprobe must be installed separately (e.g. `brew install ffmpeg`).
