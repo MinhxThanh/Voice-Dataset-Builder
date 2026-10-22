@@ -32,7 +32,10 @@ def probe_duration(path: Path) -> float:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"ffprobe failed for {path}:\n{proc.stderr}")
-    return float(json.loads(proc.stdout)["format"]["duration"])
+    duration = (json.loads(proc.stdout).get("format") or {}).get("duration")
+    if duration is None:
+        raise RuntimeError(f"ffprobe returned no duration for {path}")
+    return float(duration)
 
 
 def _codec_for_bits(sample_width_bits: int) -> str:

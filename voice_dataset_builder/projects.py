@@ -154,7 +154,7 @@ def resolve_project_dir(name: str, base: Optional[Path] = None) -> Optional[Path
     if _looks_like_project(candidate) or candidate.is_dir():
         return candidate
     legacy = base / slug
-    if legacy != candidate and (_looks_like_project(legacy) or legacy.is_dir()):
+    if legacy != candidate and _looks_like_project(legacy):
         return legacy
     return None
 

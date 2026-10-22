@@ -1068,8 +1068,8 @@ function showSummary(s, jobId) {
   let html =
     `<b>${s.clips}</b> clips (${s.train_clips} train / ${s.val_clips} val) · ` +
     `<b>${s.references}</b> refs · <b>${s.total_audio_min}</b> min · ${s.sample_rate} Hz · ` +
-    `speaker <b>${s.speaker_id}</b><br/>Formats: ${(s.formats||[]).join(", ")}<br/>` +
-    `Output: <code>${s.output_dir}</code>`;
+    `speaker <b>${escapeHtml(String(s.speaker_id))}</b><br/>Formats: ${(s.formats||[]).map(x => escapeHtml(String(x))).join(", ")}<br/>` +
+    `Output: <code>${escapeHtml(String(s.output_dir))}</code>`;
   html += renderOpeners(s.formats);
   if (s.preview && s.preview.length) {
     html += renderPreviewRows(s.preview, jobId);

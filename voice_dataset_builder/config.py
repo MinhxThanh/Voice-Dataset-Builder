@@ -80,6 +80,15 @@ class BuildConfig:
         self.output_dir = Path(self.output_dir)
         if self.clip_prefix is None:
             self.clip_prefix = self.speaker_id
+        for field_name in ("speaker_id", "clip_prefix"):
+            value = str(getattr(self, field_name) or "").strip()
+            if (
+                not value
+                or value in (".", "..")
+                or any(not (ch.isalnum() or ch in "-_.() ") for ch in value)
+            ):
+                raise ValueError(f"{field_name} must be a safe filename component")
+            setattr(self, field_name, value)
         if self.min_clip_sec <= 0:
             raise ValueError("min_clip_sec must be > 0")
         if self.max_clip_sec < self.min_clip_sec:
@@ -88,6 +97,8 @@ class BuildConfig:
             raise ValueError("val_ratio must be in [0, 1)")
         if self.sample_width_bits not in (16, 24, 32):
             raise ValueError("sample_width_bits must be 16, 24, or 32")
+        if len(self.csv_delimiter) != 1 or self.csv_delimiter in "\r\n\0":
+            raise ValueError("csv_delimiter must be exactly one character")
         # Clamp cleaning knobs to sane ranges so a stray "-7" or "-99" in the
         # form can't trash a build.
         from .audio import LUFS_MIN, LUFS_MAX, SILENCE_DB_MIN, SILENCE_DB_MAX
@@ -155,7 +166,7 @@ class BuildConfig:
     def resume_state_json(self) -> Path:
         return self.output_dir / ".resume_state.json"
 
-    def resume_fingerprint(self) -> str:
+    def resume_fingerprint(self, legacy: bool = False) -> str:
         """Stable hash of the inputs+core settings that define a build.
 
         Resume only triggers when this matches the saved state, so any
@@ -179,5 +190,21 @@ class BuildConfig:
             "limit_seconds": self.limit_seconds,
             "prefer_subtitles": self.prefer_subtitles,
         }
+        if not legacy:
+            payload.update({
+                "loudnorm": self.loudnorm,
+                "loudnorm_lufs": self.loudnorm_lufs,
+                "loudnorm_two_pass": self.loudnorm_two_pass,
+                "remove_silence": self.remove_silence,
+                "silence_threshold_db": self.silence_threshold_db,
+                "highpass_hz": self.highpass_hz,
+                "denoise": self.denoise,
+                "demucs_model": self.demucs_model,
+                "device": self.device,
+                "compute_type": self.compute_type,
+                "initial_prompt": self.initial_prompt,
+                "min_confidence": self.min_confidence,
+                "keep_source_audio": self.keep_source_audio,
+            })
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]

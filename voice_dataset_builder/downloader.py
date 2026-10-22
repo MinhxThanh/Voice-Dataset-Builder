@@ -29,6 +29,7 @@ class AudioSource:
     source_id: str
     audio_path: Path            # mp3 we produced
     subtitle_path: Optional[Path] = None
+    input_index: int = 0
 
 
 # Backwards-compatible alias.
@@ -118,7 +119,7 @@ def _find_subtitle(
 
 def _find_media(work_dir: Path, video_id: str) -> Optional[Path]:
     for p in sorted(work_dir.glob(f"{video_id}.*")):
-        if p.suffix.lower()[1:] not in ("vtt", "srt", "mp3"):
+        if p.suffix.lower()[1:] not in ("vtt", "srt") and not p.name.endswith(".audio.mp3"):
             return p
     return None
 
@@ -161,7 +162,7 @@ def _download_python(
     media = _find_media(work_dir, video_id)
     if media is None:
         raise RuntimeError(f"Download succeeded but no media file found for {url}")
-    mp3_path = work_dir / f"{video_id}.mp3"
+    mp3_path = work_dir / f"{video_id}.audio.mp3"
     _to_mp3(media, mp3_path, sample_rate)
     sub = _find_subtitle(work_dir, video_id, languages) if want_subtitles else None
     return AudioSource(
@@ -209,7 +210,7 @@ def _download_cli(
     media = _find_media(work_dir, video_id)
     if media is None:
         raise RuntimeError(f"Download succeeded but no media file found for {url}")
-    mp3_path = work_dir / f"{video_id}.mp3"
+    mp3_path = work_dir / f"{video_id}.audio.mp3"
     _to_mp3(media, mp3_path, sample_rate)
     sub = _find_subtitle(work_dir, video_id, languages) if want_subtitles else None
     return AudioSource(
@@ -236,25 +237,29 @@ def collect_sources(
     audio_format: str = "mp3",
     want_subtitles: bool = False,
     languages: Optional[List[str]] = None,
+    input_start: int = 0,
     on_error: str = "warn",
     log=print,
 ) -> List[AudioSource]:
     sources: List[AudioSource] = []
-    for url in urls:
+    for offset, url in enumerate(urls):
         try:
             log(f"Downloading video + extracting mp3: {url}")
-            sources.append(
-                download_audio(
-                    url, work_dir, sample_rate, audio_format, want_subtitles, languages
-                )
+            source = download_audio(
+                url, work_dir, sample_rate, audio_format, want_subtitles, languages
             )
+            source.input_index = input_start + offset
+            sources.append(source)
         except Exception as exc:  # noqa: BLE001
             if on_error == "raise":
                 raise
             log(f"[warn] failed to download {url}: {exc}")
-    for path in local_sources:
+    local_start = input_start + len(urls)
+    for offset, path in enumerate(local_sources):
         try:
-            sources.append(ingest_local(path, work_dir))
+            source = ingest_local(path, work_dir)
+            source.input_index = local_start + offset
+            sources.append(source)
         except Exception as exc:  # noqa: BLE001
             if on_error == "raise":
                 raise

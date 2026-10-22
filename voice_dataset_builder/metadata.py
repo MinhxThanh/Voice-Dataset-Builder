@@ -158,7 +158,9 @@ def write_gpt_sovits(records: List[Record], path: Path) -> None:
         for rec in records:
             lang = _sovits_lang(rec.language)
             audio_path = (dataset_root / rec.audio_path).resolve()
-            fh.write(f"{audio_path}|{rec.speaker_id}|{lang}|{rec.text}\n")
+            speaker = rec.speaker_id.replace("|", " ").replace("\n", " ").replace("\r", " ")
+            text = rec.text.replace("|", " ").replace("\n", " ").replace("\r", " ")
+            fh.write(f"{audio_path}|{speaker}|{lang}|{text}\n")
 
 
 def write_fish_labs(records: List[Record], dataset_root: Path) -> int:
@@ -213,6 +215,15 @@ def update_clip_text(
     ``.lab`` sidecar when present. Returns True if at least one file changed.
     """
     root = Path(dataset_root)
+    rel = Path(audio_path)
+    if (
+        rel.is_absolute()
+        or "\\" in audio_path
+        or ".." in rel.parts
+        or len(rel.parts) != 2
+        or rel.parts[0] != "audios"
+    ):
+        raise ValueError("audio_path must be a file directly under audios/")
     new_text = (new_text or "").strip()
     changed = False
 
@@ -242,15 +253,22 @@ def update_clip_text(
         nonlocal changed
         if not path.exists():
             return
+        absolute_audio_path = str((root / audio_path).resolve())
         out = []
         hit = False
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line:
                 out.append(line)
                 continue
-            parts = line.split(delim)
-            if parts and parts[0] == audio_path and len(parts) > text_index:
-                parts[text_index] = new_text
+            parts = line.split(delim, text_index)
+            if (
+                parts
+                and parts[0] in (audio_path, absolute_audio_path)
+                and len(parts) > text_index
+            ):
+                parts[text_index] = (
+                    new_text.replace(delim, " ").replace("\n", " ").replace("\r", " ")
+                )
                 hit = True
             out.append(delim.join(parts))
         if hit:
@@ -263,19 +281,18 @@ def update_clip_text(
         if not path.exists():
             return
         clip_id = audio_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        out, hit = [], False
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line:
-                out.append(line); continue
-            parts = line.split(delim)
-            if parts and parts[0] == clip_id and len(parts) >= 2:
-                parts[1] = new_text
-                if len(parts) >= 3:
-                    parts[2] = new_text
+        with path.open(encoding="utf-8", newline="") as fh:
+            rows = list(csv.reader(fh, delimiter=delim))
+        hit = False
+        for row in rows:
+            if row and row[0] == clip_id and len(row) >= 2:
+                row[1] = new_text
+                if len(row) >= 3:
+                    row[2] = new_text
                 hit = True
-            out.append(delim.join(parts))
         if hit:
-            path.write_text("\n".join(out) + "\n", encoding="utf-8")
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                csv.writer(fh, delimiter=delim).writerows(rows)
             changed = True
 
     _rewrite_jsonl(root / "metadata_train.jsonl")

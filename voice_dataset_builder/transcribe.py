@@ -429,7 +429,7 @@ def shape_segments(
     merge_gap_sec: float,
     min_confidence: Optional[float] = None,
 ) -> List[Segment]:
-    """Merge tiny adjacent segments, split long ones, and filter by length.
+    """Merge tiny adjacent segments and filter unusable ones.
 
     ``min_confidence`` drops low-quality segments (faster-whisper avg_logprob,
     typically in roughly [-1.0, 0.0]) before shaping.
@@ -461,26 +461,13 @@ def shape_segments(
             cur = Segment(nxt.start, nxt.end, nxt.text)
     merged.append(cur)
 
-    shaped: List[Segment] = []
-    for seg in merged:
-        if seg.duration <= max_sec:
-            shaped.append(seg)
-            continue
-        n_chunks = int(seg.duration // max_sec) + 1
-        chunk_len = seg.duration / n_chunks
-        for i in range(n_chunks):
-            s = seg.start + i * chunk_len
-            e = min(seg.end, s + chunk_len)
-            text = seg.text if i == 0 else ""
-            shaped.append(Segment(s, e, text))
-
     final: List[Segment] = []
-    for seg in shaped:
+    for seg in merged:
         if not seg.text:
             continue
         if seg.duration < 1.0:
             continue
-        if seg.duration < min_sec and len(shaped) > 1:
+        if seg.duration < min_sec and len(merged) > 1:
             continue
         final.append(seg)
     return final

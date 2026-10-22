@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -55,9 +54,14 @@ def _load_resume_state(config: BuildConfig, log: LogFn) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         log(f"resume state unreadable ({exc}) - starting fresh")
         return None
-    if state.get("fingerprint") != config.resume_fingerprint():
+    saved_fingerprint = state.get("fingerprint")
+    if saved_fingerprint not in {
+        config.resume_fingerprint(), config.resume_fingerprint(legacy=True)
+    }:
         log("resume state stale - starting fresh")
         return None
+    if saved_fingerprint == config.resume_fingerprint(legacy=True):
+        log("legacy resume state accepted; it will be upgraded on the next save")
     log(
         f"resume state found: source_idx={state.get('source_idx', 0)} "
         f"chunk_idx={state.get('chunk_idx', 0)} "
@@ -234,54 +238,77 @@ def build_dataset(
     config.output_dir.mkdir(parents=True, exist_ok=True)
     config.audios_dir.mkdir(parents=True, exist_ok=True)
 
-    work_dir = Path(tempfile.mkdtemp(prefix="vdb_"))
+    records: List[Record] = []
+    clip_index = 0
+    resume_state = _load_resume_state(config, _log)
+    resume_source_idx = 0
+    resume_chunk_idx = 0
+    if resume_state:
+        resume_source_idx = int(resume_state.get("source_idx", 0))
+        resume_chunk_idx = int(resume_state.get("chunk_idx", 0))
+        clip_index = int(resume_state.get("clip_index", 0))
+        for rec in resume_state.get("records", []):
+            records.append(
+                Record(
+                    audio_path=rec["audio_path"],
+                    text=rec["text"],
+                    speaker_id=rec["speaker_id"],
+                    language=rec["language"],
+                    duration=rec["duration"],
+                )
+            )
+
+    # Keep downloads only while a build is resumable. yt-dlp reuses files in
+    # this directory, so stopping mid-source does not fetch the media again.
+    work_dir = config.output_dir / ".resume_cache"
+    if not resume_state:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
     source_dir = config.output_dir / "source_audio"
     formats = config.resolved_formats()
+    completed = False
 
     try:
         # ---------- 1. acquire sources ----------
         _progress("download", 0.0)
         n_inputs = len(config.urls) + len(config.local_sources)
-        _log(f"Acquiring {n_inputs} source(s) (yt-dlp + local)...")
+        if not 0 <= resume_source_idx <= n_inputs:
+            raise RuntimeError("Resume source position is invalid for these inputs.")
+        if resume_source_idx < len(config.urls):
+            pending_urls = config.urls[resume_source_idx:]
+            pending_local = config.local_sources
+        else:
+            pending_urls = []
+            pending_local = config.local_sources[resume_source_idx - len(config.urls):]
+        pending_count = len(pending_urls) + len(pending_local)
+        if resume_state:
+            _log(
+                f"Resume: keeping {len(records)} clip(s); acquiring only "
+                f"{pending_count} unfinished source(s)."
+            )
+        else:
+            _log(f"Acquiring {pending_count} source(s) (yt-dlp + local)...")
         sub_langs = [config.language] if config.language else ["vi", "en"]
         sources = collect_sources(
-            urls=config.urls,
-            local_sources=config.local_sources,
+            urls=pending_urls,
+            local_sources=pending_local,
             work_dir=work_dir,
             sample_rate=config.sample_rate,
             audio_format="mp3",
             want_subtitles=config.prefer_subtitles,
             languages=sub_langs,
+            input_start=resume_source_idx,
             log=_log,
         )
-        if not sources:
+        if not sources and pending_count:
             raise RuntimeError("No audio sources were acquired successfully.")
         _check_cancel()
         _progress("download", 1.0)
-        _log(f"Acquired {len(sources)} source(s).")
+        _log(f"Acquired {len(sources)} unfinished source(s).")
+        total = n_inputs
 
-        records: List[Record] = []
-        clip_index = 0
-        total = len(sources)
-
-        # ---------- resume: restore saved progress when it matches ----------
-        resume_state = _load_resume_state(config, _log)
-        resume_source_idx = 0
-        resume_chunk_idx = 0
+        # ---------- resume: restore saved preview ----------
         if resume_state:
-            resume_source_idx = int(resume_state.get("source_idx", 0))
-            resume_chunk_idx = int(resume_state.get("chunk_idx", 0))
-            clip_index = int(resume_state.get("clip_index", 0))
-            for rec in resume_state.get("records", []):
-                records.append(
-                    Record(
-                        audio_path=rec["audio_path"],
-                        text=rec["text"],
-                        speaker_id=rec["speaker_id"],
-                        language=rec["language"],
-                        duration=rec["duration"],
-                    )
-                )
             for rec in records:
                 _preview(
                     {
@@ -294,13 +321,12 @@ def build_dataset(
                 )
             _log(
                 f"resumed with {len(records)} existing clip(s); continuing "
-                f"from source {resume_source_idx + 1}/{total}"
+                f"from source {min(resume_source_idx + 1, total)}/{total}"
             )
 
-        for idx, src in enumerate(sources):
+        for src in sources:
+            idx = src.input_index
             _check_cancel()
-            if idx < resume_source_idx:
-                continue
             base = idx / total
 
             # ---------- optional denoise ----------
@@ -361,8 +387,11 @@ def build_dataset(
             _log(f"  shaped_segments={len(shaped)}")
 
             # ---------- 4. clean + cut clips ----------
+            source_resume_chunk = resume_chunk_idx if idx == resume_source_idx else 0
             for i, seg in enumerate(shaped, start=1):
                 _check_cancel()
+                if i <= source_resume_chunk:
+                    continue
                 clip_index += 1
                 clip_name = f"{config.clip_prefix}_{clip_index:04d}.wav"
                 clip_path = config.audios_dir / clip_name
@@ -404,6 +433,7 @@ def build_dataset(
                     _progress("clean", base + (i / len(shaped)) / total)
                 if i % 10 == 0 or i == len(shaped):
                     _log(f"  clips written: {i}/{len(shaped)}")
+                _save_state(idx, i, clip_index)
 
             if config.keep_source_audio:
                 _keep_source_audio(src, source_dir, _log)
@@ -420,11 +450,12 @@ def build_dataset(
         # ---------- 5. write metadata + references ----------
         _progress("save", 0.2)
         summary = _flush_metadata(config, records, formats, _log, partial=False)
-        summary["sources"] = len(sources)
+        summary["sources"] = n_inputs
         _progress("save", 1.0)
 
         # Build completed cleanly: drop resume state so the next run starts fresh.
         _clear_resume_state(config)
+        completed = True
 
         _log("Done.")
         _log(json.dumps({k: v for k, v in summary.items() if k != "preview"},
@@ -443,7 +474,8 @@ def build_dataset(
             _log("Stopped before any clips were produced.")
         raise
     finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if completed:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _get_transcript(
@@ -483,7 +515,7 @@ def _should_chunk_before_ai(config: BuildConfig) -> bool:
 
 
 def _chunk_ranges(duration: float, min_sec: float, max_sec: float) -> List[tuple[float, float]]:
-    chunk_len = max(min(max_sec, 12.0), min_sec, 4.0)
+    chunk_len = max(min(max_sec, 12.0), min_sec)
     ranges = []
     start = 0.0
     while start < duration:
@@ -492,7 +524,11 @@ def _chunk_ranges(duration: float, min_sec: float, max_sec: float) -> List[tuple
             break
         if ranges and end - start < min_sec:
             prev_start, _ = ranges[-1]
-            ranges[-1] = (prev_start, end)
+            if end - prev_start <= max_sec or end - min_sec - prev_start < min_sec:
+                ranges[-1] = (prev_start, end)
+            else:
+                ranges[-1] = (prev_start, end - min_sec)
+                ranges.append((end - min_sec, end))
         else:
             ranges.append((start, end))
         start = end
@@ -566,7 +602,16 @@ def _transcribe_chunked_ai(
             highpass_hz=config.highpass_hz or None,
             loudnorm_two_pass=config.loudnorm_two_pass,
         )
-        actual_dur = audio_utils.probe_duration(clip_path)
+        try:
+            actual_dur = audio_utils.probe_duration(clip_path)
+        except RuntimeError:
+            if i != len(ranges):
+                raise
+            log(f"  chunk {i}/{len(ranges)} has no playable audio; skipped")
+            clip_path.unlink(missing_ok=True)
+            clip_index -= 1
+            save_state(source_idx, i, clip_index)
+            continue
         rel_path = f"audios/{clip_name}"
         # Streaming row 1: audio is ready, text is still decoding.
         preview(
@@ -598,16 +643,29 @@ def _transcribe_chunked_ai(
                 }
             )
 
-        transcript = transcribe(
-            chunk_path,
-            model=config.whisper_model,
-            backend=config.whisper_backend,
-            language=config.language,
-            device=config.device,
-            compute_type=config.compute_type,
-            initial_prompt=config.initial_prompt,
-            on_segment=_on_segment,
-        )
+        try:
+            transcript = transcribe(
+                chunk_path,
+                model=config.whisper_model,
+                backend=config.whisper_backend,
+                language=config.language,
+                device=config.device,
+                compute_type=config.compute_type,
+                initial_prompt=config.initial_prompt,
+                on_segment=_on_segment,
+            )
+        except Exception:
+            clip_path.unlink(missing_ok=True)
+            preview(
+                {
+                    "clip_id": clip_id,
+                    "audio_path": rel_path,
+                    "text": "",
+                    "duration": round(actual_dur, 2),
+                    "status": "removed",
+                }
+            )
+            raise
         text = " ".join(seg.text for seg in transcript.segments if seg.text).strip()
         if not text:
             # Empty chunk: drop the row and the orphan clip, reuse the index.
@@ -683,7 +741,7 @@ def _is_full_audio_single_segment(
 def _maybe_limit(segments, limit_seconds: Optional[float]):
     if not limit_seconds:
         return segments
-    return [s for s in segments if s.start < limit_seconds]
+    return [s for s in segments if s.end <= limit_seconds]
 
 
 def _make_references(records: List[Record], config: BuildConfig, log: LogFn) -> int:

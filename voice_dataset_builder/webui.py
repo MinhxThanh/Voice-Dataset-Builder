@@ -112,6 +112,17 @@ class Job:
             }
 
 
+def _persist_text_overrides(job: Job) -> None:
+    if not job.output_dir:
+        return
+    with job.lock:
+        for clip_id, text in job.text_overrides.items():
+            try:
+                update_clip_text(Path(job.output_dir), f"audios/{clip_id}.wav", text)
+            except Exception as exc:  # noqa: BLE001
+                job.logs.append(f"[warn] could not save edit for {clip_id}: {exc}")
+
+
 class JobManager:
     def __init__(self) -> None:
         self._jobs: Dict[str, Job] = {}
@@ -148,17 +159,20 @@ class JobManager:
                     preview=job.append_preview,
                     should_cancel=job.cancel_requested,
                 )
+                _persist_text_overrides(job)
                 with job.lock:
                     job.summary = summary
                     job.status = "done"
                     job.overall = 1.0
             except BuildCancelled:
                 job.append("Build cancelled by user.")
+                _persist_text_overrides(job)
                 with job.lock:
                     job.status = "cancelled"
             except Exception as exc:  # noqa: BLE001
                 job.append(f"ERROR: {exc}")
                 job.append(traceback.format_exc())
+                _persist_text_overrides(job)
                 with job.lock:
                     job.error = str(exc)
                     job.status = "error"
@@ -372,6 +386,9 @@ class Handler(BaseHTTPRequestHandler):
                 {"error": "clip_id, text and a job_id or project are required"},
                 status=400,
             )
+            return
+        if clip_id in (".", "..") or "/" in clip_id or "\\" in clip_id:
+            self._send_json({"error": "invalid clip_id"}, status=400)
             return
         text = str(text).strip()
         output_dir = None
